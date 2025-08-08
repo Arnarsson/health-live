@@ -9,6 +9,29 @@
 
 import { useEffect, useState } from 'react';
 import Head from 'next/head';
+import { Line } from 'react-chartjs-2';
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Legend,
+  Tooltip,
+} from 'chart.js';
+
+// Register Chart.js components to enable line charts. Without registering these
+// components the charts will not render in Chart.js v4+. This setup is
+// deliberately minimal and does not specify colours, allowing Chart.js to
+// select sensible defaults.
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Legend,
+  Tooltip
+);
 
 // Helper to pick the first available value from a list of potential keys
 function getMetric(obj = {}, keys) {
@@ -180,6 +203,98 @@ export default function Home() {
     alerts.push('Elevated Temperature');
   }
 
+  // Calculate sleep debt over the last 7 days. We assume an optimal nightly sleep
+  // duration of 7.5 hours (52.5 total hours per week). If the sum of the last 7
+  // recorded sleep hours falls short, the difference is treated as "sleep debt".
+  let sleepDebtHours = null;
+  if (processed.length >= 7) {
+    const last7 = processed.slice(-7);
+    const totalSleep = last7.reduce(
+      (sum, p) => sum + (p.sleepHours != null ? p.sleepHours : 0),
+      0
+    );
+    const optimal = 7 * 7.5;
+    const debt = optimal - totalSleep;
+    sleepDebtHours = debt > 0 ? debt : 0;
+  }
+
+  // Estimate a target sleep recommendation for tonight based on recovery,
+  // exertion and accumulated sleep debt. This simple heuristic starts with
+  // eight hours and adds half-hour increments if recovery is low, exertion
+  // unusually high or sleep debt is significant. If no recovery score is
+  // available (e.g. no data yet) we leave this as null.
+  let targetSleep = null;
+  if (recoveryScore != null) {
+    targetSleep = 8;
+    if (recoveryScore < 80) targetSleep += 0.5;
+    if (exertionScore != null && exertionScore > 120) targetSleep += 0.5;
+    if (sleepDebtHours != null && sleepDebtHours > 3) targetSleep += 0.5;
+  }
+
+  // Build trend data for recovery and exertion across all processed entries. For
+  // each day we derive a relative recovery (0–100) from that day's HRV and
+  // RHR versus baseline, and an exertion ratio (exertionScore-like) from
+  // training load versus baseline. Missing values are represented as null so
+  // charts can leave gaps gracefully.
+  const labels = processed.map((p) => p.date);
+  const recoveryTrend = processed.map((p) => {
+    if (baselineHRV && p.hrv && baselineRHR && p.rhr) {
+      return (
+        ((p.hrv / baselineHRV) * 0.7 + (baselineRHR / p.rhr) * 0.3) * 100
+      );
+    }
+    return null;
+  });
+  const exertionTrend = processed.map((p) => {
+    if (baselineLoad && p.trainingLoad) {
+      return (p.trainingLoad / baselineLoad) * 100;
+    }
+    return null;
+  });
+  const chartData = {
+    labels,
+    datasets: [
+      {
+        label: 'Recovery (%)',
+        data: recoveryTrend,
+        yAxisID: 'y',
+      },
+      {
+        label: 'Exertion',
+        data: exertionTrend,
+        yAxisID: 'y1',
+      },
+    ],
+  };
+  const chartOptions = {
+    responsive: true,
+    interaction: {
+      mode: 'index',
+      intersect: false,
+    },
+    scales: {
+      y: {
+        type: 'linear',
+        position: 'left',
+        title: {
+          display: true,
+          text: 'Recovery (%)',
+        },
+      },
+      y1: {
+        type: 'linear',
+        position: 'right',
+        title: {
+          display: true,
+          text: 'Exertion',
+        },
+        grid: {
+          drawOnChartArea: false,
+        },
+      },
+    },
+  };
+
   return (
     <div className="container">
       <Head>
@@ -201,19 +316,11 @@ export default function Home() {
           <div className="cards">
             <div className="card">
               <h2>Recovery</h2>
-              {recoveryScore != null ? (
-                <p>{recoveryScore}%</p>
-              ) : (
-                <p>N/A</p>
-              )}
+              {recoveryScore != null ? <p>{recoveryScore}%</p> : <p>N/A</p>}
             </div>
             <div className="card">
               <h2>Exertion</h2>
-              {exertionScore != null ? (
-                <p>{exertionScore}</p>
-              ) : (
-                <p>N/A</p>
-              )}
+              {exertionScore != null ? <p>{exertionScore}</p> : <p>N/A</p>}
             </div>
             <div className="card">
               <h2>Target Zone</h2>
@@ -222,6 +329,22 @@ export default function Home() {
             <div className="card">
               <h2>Sleep Quality</h2>
               {sleepQuality ? <p>{sleepQuality}</p> : <p>N/A</p>}
+            </div>
+            <div className="card">
+              <h2>Sleep Debt</h2>
+              {sleepDebtHours != null ? (
+                <p>{sleepDebtHours.toFixed(2)}h</p>
+              ) : (
+                <p>N/A</p>
+              )}
+            </div>
+            <div className="card">
+              <h2>Target Sleep</h2>
+              {targetSleep != null ? (
+                <p>{targetSleep.toFixed(2)}h</p>
+              ) : (
+                <p>N/A</p>
+              )}
             </div>
             <div className="card">
               <h2>Alerts</h2>
@@ -283,6 +406,11 @@ export default function Home() {
               </tbody>
             </table>
           </div>
+        <div className="chart-container">
+          <h2>Recovery vs Exertion Trend</h2>
+          {/* Chart only renders when there is data; Chart.js gracefully handles null values */}
+          <Line data={chartData} options={chartOptions} />
+        </div>
         </>
       )}
       <style jsx>{`
@@ -338,6 +466,9 @@ export default function Home() {
         }
         th {
           background: #f5f5f5;
+        }
+        .chart-container {
+          margin-top: 2rem;
         }
       `}</style>
     </div>
